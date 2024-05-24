@@ -1,6 +1,6 @@
 import logging
 import numpy as np
-import cvxpy
+#import cvxpy
 from abc import ABC, abstractmethod
 from typing import NamedTuple, Optional, Tuple
 from sklearn.model_selection import train_test_split
@@ -11,7 +11,12 @@ import scipy
 from time import time
 from sklearn.preprocessing import OneHotEncoder
 from scipy.optimize import minimize
-
+import multiprocessing
+from functools import partial
+from joblib import Parallel, delayed
+import torch
+import torch.nn as nn
+import torch.optim as optim
 
 class ClfRegHot:
     @abstractmethod
@@ -96,22 +101,22 @@ def _prepare_leaf_data_fast(xs, y, leaf_ids, estimators, multiplier=1.0):
             if mask.any():
                 result_x[tree_id, leaf_id] = masked_xs.mean(axis=0)
                 result_y[tree_id, leaf_id] = masked_y.mean(axis=0) * multiplier
-                print("Tree id:" )
-                print(tree_id)
-                print("leaf_id:")
-                print(leaf_id)
-                print("x:")
-                print(masked_xs.shape)
-                print(masked_xs)
-                print("to:")
-                print(result_x[tree_id, leaf_id])
-                print(result_x[tree_id, leaf_id].shape)
-                print("y:")
-                print(masked_y.shape)
-                print(masked_y)
-                print("to:")
-                print(result_y[tree_id, leaf_id].shape)
-                print(result_y[tree_id, leaf_id])
+                # print("Tree id:" )
+                # print(tree_id)
+                # print("leaf_id:")
+                # print(leaf_id)
+                # print("x:")
+                # print(masked_xs.shape)
+                # print(masked_xs)
+                # print("to:")
+                # print(result_x[tree_id, leaf_id])
+                # print(result_x[tree_id, leaf_id].shape)
+                # print("y:")
+                # print(masked_y.shape)
+                # print(masked_y)
+                # print("to:")
+                # print(result_y[tree_id, leaf_id].shape)
+                # print(result_y[tree_id, leaf_id])
     return result_x, result_y
 
 def _prepare_leaf_data_cl(xs, y, leaf_ids, estimators, multiplier=1.0):
@@ -133,16 +138,36 @@ def _prepare_leaf_data_cl(xs, y, leaf_ids, estimators, multiplier=1.0):
         for leaf_id in range(estimators[tree_id].tree_.node_count + 1):
             # Для каждого листа выполняется маскирование входных данных xs и целевых переменных y с использованием leaf_ids, чтобы выбрать только те данные, которые относятся к текущему листу.
             mask = (leaf_ids[:, tree_id] == leaf_id)
+
             masked_xs = xs[mask]
+            # print("masked_xs.shape")
+            # print(masked_xs.shape)
             masked_y = y[mask]
+            # print("masked_y.shape")
+            # print(masked_y.shape)
+
             # если хотя бы один образец относится к текущему листу (mask.any()), вычисляется среднее значение признаков masked_xs и целевых переменных masked_y.
             if mask.any():
                 #y = количество x соответствующих классу y деленное на общее кол-во x
                 result_x[tree_id, leaf_id] = masked_xs.mean(axis=0) #A(x)
-
-
-                result_y[tree_id, leaf_id] = masked_y.sum(axis=0)/len(result_x[tree_id, leaf_id]) #(B(x))
-
+                # print("len(result_x[tree_id, leaf_id])")
+                # print(len(result_x[tree_id, leaf_id]))
+                # print("masked_y")
+                # print(masked_y)
+                # print("masked_y.sum(axis=0)")
+                # print(masked_y.sum(axis=0))
+                # result_y[tree_id, leaf_id] = masked_y.sum(axis=0)/len(result_x[tree_id, leaf_id]) #(B(x))
+                class_counts = np.sum(masked_y, axis=0)  # Суммируем количество примеров каждого класса в листе
+                total_samples = masked_y.shape[0]  # Общее количество примеров в листе
+                result_y[tree_id, leaf_id] = class_counts / total_samples  # Вычисляем вероятности для каждого класса
+                # print("result_y[tree_id, leaf_id]")
+                # print(result_y[tree_id, leaf_id])
+                # print("masked_y.sum(axis=0)")
+                # print(masked_y.sum(axis=0))
+                # print("len(result_x[tree_id, leaf_id])")
+                # print(len(result_x[tree_id, leaf_id]))
+                # print("result_y[tree_id, leaf_id]")
+                # print(result_y[tree_id, leaf_id])
                 # print("Tree id:" )
                 # print(tree_id)
                 # print("leaf_id:")
@@ -163,6 +188,7 @@ def _prepare_leaf_data_cl(xs, y, leaf_ids, estimators, multiplier=1.0):
                 # print("to:")
                 # print(result_y[tree_id, leaf_id].shape)
                 # print(result_y[tree_id, leaf_id])
+    print("sssssssssssssssssssssssssssssssssss")
     return result_x, result_y
 
 
@@ -220,7 +246,7 @@ class AttentionForest(ClfRegHot):
         if hasattr(self.forest, 'get_leaf_data'):
             self.leaf_data_x, self.leaf_data_y = self.forest.get_leaf_data()
         else:
-            self.leaf_data_x, self.leaf_data_y = _prepare_leaf_data_cl(
+            self.leaf_data_x, self.leaf_data_y = _prepare_leaf_data_fast(
                 self.training_xs,
                 self.training_y,
                 self.training_leaf_ids,
@@ -297,27 +323,27 @@ class AttentionForest(ClfRegHot):
             predictions += self.forest.init_.predict(X)
         return predictions
 
-    def predict_proba(self, X):
-        assert self.forest is not None, "Need to fit before predict"
-        all_dynamic_weights, all_y = self._get_dynamic_weights_y(X)
-        weights = _softmax(all_dynamic_weights * self.tree_weights[np.newaxis], axis=1)
-        if self.params.eps is not None:
-            mixed_weights = (1.0 - self.params.eps) * weights + self.params.eps * self.static_weights
-        else:
-            mixed_weights = weights
-        mixed_weights = mixed_weights[..., np.newaxis]
-        predictions = np.sum(mixed_weights * all_y, axis=1)
-
-        # Преобразуем значения в вероятности, используя softmax
-        # Каждое значение будет преобразовано в вероятность для каждого класса
-        if predictions.ndim == 1:
-            # Для случая бинарной классификации
-            predictions_proba = np.column_stack((1 - predictions, predictions))
-        else:
-            # Для многоклассовой классификации
-            predictions_proba = _softmax(predictions, axis=1)
-
-        return predictions_proba
+    # def predict_proba(self, X):
+    #     assert self.forest is not None, "Need to fit before predict"
+    #     all_dynamic_weights, all_y = self._get_dynamic_weights_y(X)
+    #     weights = _softmax(all_dynamic_weights * self.tree_weights[np.newaxis], axis=1)
+    #     if self.params.eps is not None:
+    #         mixed_weights = (1.0 - self.params.eps) * weights + self.params.eps * self.static_weights
+    #     else:
+    #         mixed_weights = weights
+    #     mixed_weights = mixed_weights[..., np.newaxis]
+    #     predictions = np.sum(mixed_weights * all_y, axis=1)
+    #
+    #     # Преобразуем значения в вероятности, используя softmax
+    #     # Каждое значение будет преобразовано в вероятность для каждого класса
+    #     if predictions.ndim == 1:
+    #         # Для случая бинарной классификации
+    #         predictions_proba = np.column_stack((1 - predictions, predictions))
+    #     else:
+    #         # Для многоклассовой классификации
+    #         predictions_proba = _softmax(predictions, axis=1)
+    #
+    #     return predictions_proba
 
     def predict_original(self, X):
         if self.params.task == TaskType.REGRESSION:
@@ -340,7 +366,6 @@ class EpsAttentionForest(AttentionForest):
 
     def optimize_weights(self, X, y_orig) -> 'EpsAttentionForest':
         assert self.forest is not None, "Need to fit before weights optimization"
-        # Получение динамических весов и целевых переменных на основе входных данных X с помощью метода _get_dynamic_weights_y.
         dynamic_weights, dynamic_y = self._get_dynamic_weights_y(X)
         static_weights = cp.Variable((1, self.forest.n_estimators))
 
@@ -352,7 +377,6 @@ class EpsAttentionForest(AttentionForest):
 
         if dynamic_y.shape[2] == 1:
             dynamic_y = dynamic_y[..., 0]
-            # dynamic_weights = D_k(x_s, tau), static_weights = B_k(x_s)
             mixed_weights = (1.0 - self.params.eps) * dynamic_weights + self.params.eps * static_weights
         else:
             # y0: y0t0_0 y0t0_1 ... y0t0_d | y0t1_0 y0t1_1 ... y0t1_d | ... | y0tT_0 ... y0tT_d
@@ -366,11 +390,10 @@ class EpsAttentionForest(AttentionForest):
             # dynamic_weights shape: (n_samples, n_trees)
             # repeat dynamic weights for each output
             dynamic_weights = np.tile(dynamic_weights[:, np.newaxis, :], (1, n_outs, 1)).reshape((-1, n_trees))
-            # dynamic_weights = D_k(x_s, tau), static_weights = B_k(x_s)
-            mixed_weights = (1.0 - self.params.eps) * dynamic_weights + self.params.eps * static_weights #alpha = mixed_weights
+            mixed_weights = (1.0 - self.params.eps) * dynamic_weights + self.params.eps * static_weights
             y, self.onehot_encoder = _convert_labels_to_probas(y, self.onehot_encoder)
             y = y.toarray().ravel()
-            #print("Shapes:", mixed_weights.shape, dynamic_y.shape)
+            print("Shapes:", mixed_weights.shape, dynamic_y.shape)
         loss_terms = cp.sum(cp.multiply(mixed_weights, dynamic_y), axis=1) - y
         if self.params.loss_ord == 1:
             min_obj = cp.sum(cp.abs(loss_terms))
@@ -379,11 +402,11 @@ class EpsAttentionForest(AttentionForest):
         else:
             raise ValueError(f'Wrong loss order: {self.params.loss_ord}')
         problem = cp.Problem(cp.Minimize(min_obj),
-                             [
-                                 static_weights >= 0,
-                                 cp.sum(static_weights, axis=1) == 1
-                             ]
-                             )
+            [
+                static_weights >= 0,
+                cp.sum(static_weights, axis=1) == 1
+            ]
+        )
 
         try:
             loss_value = problem.solve()
@@ -433,29 +456,6 @@ class EpsAttentionForest(AttentionForest):
             predictions += self.forest.init_.predict(X)[:, np.newaxis]
         return predictions
 
-    def predict_proba(self, X):
-        assert self.forest is not None, "Need to fit before predict_proba"
-        all_dynamic_weights, all_y = self._get_dynamic_weights_y(X)
-        all_dynamic_weights = -0.5 * np.linalg.norm(all_dynamic_weights / self.feature_weights, 2, axis=-1) ** 2.0
-        weights = _softmax(all_dynamic_weights * self.tree_weights[np.newaxis], axis=1)
-        if self.params.eps is not None:
-            mixed_weights = (1.0 - self.params.eps) * weights + self.params.eps * self.static_weights
-        else:
-            mixed_weights = weights
-        mixed_weights = mixed_weights[..., np.newaxis]
-        predictions = np.sum(mixed_weights * all_y, axis=1)
-
-        # Преобразуем значения в вероятности, используя softmax
-        # Каждое значение будет преобразовано в вероятность для каждого класса
-        if predictions.ndim == 1:
-            # Для случая бинарной классификации
-            predictions_proba = np.column_stack((1 - predictions, predictions))
-        else:
-            # Для многоклассовой классификации
-            predictions_proba = _softmax(predictions, axis=1)
-
-        return predictions_proba
-
 
 class FeatureWeightedAttentionForest(AttentionForest):
     def __init__(self, params: FWAFParams):
@@ -469,110 +469,11 @@ class FeatureWeightedAttentionForest(AttentionForest):
         self.feature_weights = np.ones(n_features)
         return self
 
-    def optimize_weights(self, X, y) -> 'AttentionForest':
-        assert self.forest is not None, "Need to fit before weights optimization"
-        y = self._preprocess_target(y)
-        dynamic_weights, dynamic_y = self._get_dynamic_weights_y(X) #x - A(x), p(x)
-
-        if dynamic_y.shape[2] == 1:
-            dynamic_y = dynamic_y[..., 0]
-
-        w_init = np.ones(self.forest.n_estimators)
-        n_features = X.shape[1]
-        feature_weights_init = np.ones(n_features)
-        if self.params.eps is not None:
-            static_weights_init = np.ones(self.forest.n_estimators) / self.forest.n_estimators
-
-
-
-        def _model(cur_feature_weights, cur_w, cur_static_weights):
-            new_dyn_weights = -0.5 * np.linalg.norm(dynamic_weights / cur_feature_weights, 2, axis=-1) ** 2.0
-            alphas = new_dyn_weights * np.abs(cur_w)
-            alphas_softmax = _softmax(alphas, axis=1)
-            if self.params.eps is not None:
-                static_softmax = _softmax(cur_static_weights, axis=0)
-                mixed_weights = (1.0 - self.params.eps) * alphas_softmax + self.params.eps * static_softmax
-            else:
-                mixed_weights = alphas_softmax
-            if dynamic_y.ndim == 3:
-                mixed_weights = mixed_weights[..., np.newaxis]
-            return np.sum(
-                np.multiply(mixed_weights, dynamic_y),
-                axis=1
-            )
-
-        def _loss(cur_preds, y_true):
-            loss_terms = cur_preds - y_true
-            if self.params.loss_ord == 1:
-                loss = np.sum(np.abs(loss_terms))
-            elif self.params.loss_ord == 2:
-                if loss_terms.ndim == 2:
-                    loss = np.sum(np.linalg.norm(loss_terms, 2, axis=1) ** 2)
-                else:
-                    loss = np.sum(loss_terms ** 2)
-            else:
-                raise ValueError(f'Wrong loss order: {self.params.loss_ord}')
-            return loss
-
-        # print("Dynamic_y", dynamic_y.shape)
-        opt_params = [w_init, feature_weights_init]
-
-        if self.params.eps is not None:
-            opt_params.append(static_weights_init)
-        if self.params.no_temp:
-            # don't optimize `w`
-            params_to_optimize = opt_params[1:]
-        else:
-            params_to_optimize = opt_params
-        params_to_optimize_lens = list(map(len, params_to_optimize))
-
-        def _min_fn(cur_merged_weights):
-            # split weights
-            cur_weights = [
-                cur_merged_weights[prev_cum_len:prev_cum_len + cur_len]
-                for prev_cum_len, cur_len in
-                zip([0] + list(np.cumsum(params_to_optimize_lens))[:-1], params_to_optimize_lens)
-            ]
-
-            cur_static_weights = cur_weights[0]
-
-            if self.params.no_temp:
-                cur_tree_weights = w_init
-                idx = 0
-            else:
-                cur_tree_weights = cur_weights[0]
-                idx = 1
-            cur_feature_weights = cur_weights[idx]
-            if self.params.eps is not None:
-                cur_static_weights = cur_weights[idx + 1]
-            cur_preds = _model(cur_feature_weights, cur_tree_weights, cur_static_weights)
-            loss = _loss(cur_preds, y)
-            return loss
-
-        params_to_optimize = np.concatenate(params_to_optimize, axis=0)
-        #print(params_to_optimize.shape)
-        result = scipy.optimize.minimize(_min_fn, params_to_optimize, method='L-BFGS-B', jac=False)
-        optimal_weights = [
-            result.x[prev_cum_len:prev_cum_len + cur_len]
-            for prev_cum_len, cur_len in
-            zip([0] + list(np.cumsum(params_to_optimize_lens))[:-1], params_to_optimize_lens)
-        ]
-
-        if self.params.no_temp:
-            idx = 0
-        else:
-            self.tree_weights = optimal_weights[0].copy()
-            idx = 1
-        self.feature_weights = optimal_weights[idx].copy()
-        if self.params.eps is not None:
-            self.static_weights = _softmax(optimal_weights[idx + 1].copy())
-
-        return self
-
     #-------------------
     def optimize_weights_sgd(self, X, y) -> 'AttentionForest':
         assert self.forest is not None, "Need to fit before weights optimization"
         y = self._preprocess_target(y)
+        #print(y)
         dynamic_weights, dynamic_y = self._get_dynamic_weights_y(X) #dynamic_weights - A()
 
         if dynamic_y.shape[2] == 1:
@@ -615,6 +516,10 @@ class FeatureWeightedAttentionForest(AttentionForest):
 
         def _loss(cur_preds, y_true):
             #L(p(x),h,v,z)
+            # print("cur_preds")
+            # print(cur_preds)
+            # print("y_true")
+            # print(y_true)
             loss_terms = cur_preds - y_true
             # print("loss_terms")
             # print(loss_terms)
@@ -643,89 +548,237 @@ class FeatureWeightedAttentionForest(AttentionForest):
         else:
             params_to_optimize = opt_params
         params_to_optimize_lens = list(map(len, params_to_optimize))
-        print("params_to_optimize_lens", params_to_optimize_lens)
+        # print("params_to_optimize_lens", params_to_optimize_lens)
+
+
 
         #стохастический градиентный спуск
-        def sgd_opt(model_func, loss_func, fn_opt_params, inputs, y, n_epochs=100, batch_size=1, learning_rate=0.01):
-
-            num_samples = y.shape[0]
-            #num_features = len(params_to_optimize_lens)
+        def sgd_opt(model_func, loss_func, fn_opt_params, inputs, y_s, n_epochs=100, batch_size=1, learning_rate=0.01):
+            num_samples = y_s.shape[0]
 
             def _calculate_gradients(params):
                 gradients_S = [[0] * len(sublist) for sublist in fn_opt_params]
-                for batch_idx in range(0, num_samples, batch_size):
+
+                def compute_gradient(batch_idx):
                     batch_inputs = [inp[batch_idx:batch_idx + batch_size] for inp in inputs]
-                    batch_y = y[batch_idx:batch_idx + batch_size]
-                    param_grad = [[0] * len(sublist) for sublist in fn_opt_params]
+                    batch_y = y_s[batch_idx:batch_idx + batch_size]
+                    batch_gradients = [[0] * len(param_group) for param_group in params]
 
-                    # for i in range(num_features):
-                    #
-                    #     perturbation = np.zeros_like(params[i])
-                    #     perturbation[i] = 1e-6
-                    #
-                    #     params_pos = params.copy()
-                    #     params_neg = params.copy()
-                    #
-                    #     sum = params_pos[i] + perturbation[i]
-                    #
-                    #     params_pos[i] = sum
-                    #     params_neg[i] = params_neg[i] - perturbation[i]
-                    #
-                    #
-                    #     loss_pos = loss_func(model_func(*batch_inputs, *params_pos), batch_y)
-                    #     loss_neg = loss_func(model_func(*batch_inputs, *params_neg), batch_y)
-                    #
-                    #     new_array = [(loss_pos - loss_neg) / (2 * 1e-6)] * len(param_grad[i])
-                    #     param_grad[i] = new_array
+                    for param_idx, param_group in enumerate(params):
+                        for p_idx in range(len(param_group)):
+                            perturbation = np.zeros(len(param_group))
+                            perturbation[p_idx] = 1e-6
 
-                    perturbation = [[0] * len(sublist) for sublist in params]
-                    perturbation = [[0.5] * len(sublist) for sublist in perturbation]
-                    params_pos = params.copy()
-                    params_neg = params.copy()
-                    params_pos = [[x + y for x, y in zip(sublist1, sublist2)] for sublist1, sublist2 in zip(params_pos, perturbation)]
-                    params_neg = [[x - y for x, y in zip(sublist1, sublist2)] for sublist1, sublist2 in zip(params_neg, perturbation)]
-                    loss_pos = loss_func(model_func(*batch_inputs, *params_pos), batch_y)
-                    #print("loss_pos")
-                    # print(loss_pos)
-                    loss_neg = loss_func(model_func(*batch_inputs, *params_neg), batch_y)
-                    #print("loss_neg")
-                    # print(loss_neg)
-                    param_grad = [[(loss_pos - loss_neg) / (2 * 1e-6)] * len(sublist) for sublist in param_grad]
+                            params_pos = np.copy(param_group) + perturbation
+                            params_neg = np.copy(param_group) - perturbation
 
-                    gradients_S = [[x + y for x, y in zip(sublist1, sublist2)] for sublist1, sublist2 in zip(gradients_S, param_grad)]
+                            current_params_pos = list(params)
+                            current_params_neg = list(params)
+                            current_params_pos[param_idx] = params_pos
+                            current_params_neg[param_idx] = params_neg
+
+                            loss_pos = loss_func(model_func(*batch_inputs, *current_params_pos), batch_y)
+                            loss_neg = loss_func(model_func(*batch_inputs, *current_params_neg), batch_y)
+
+                            batch_gradients[param_idx][p_idx] = (loss_pos - loss_neg) / (2 * 1e-6)
+
+                    return batch_gradients
+
+                # Параллельное вычисление градиентов для каждого батча
+                all_gradients = Parallel(n_jobs=-1)(
+                    delayed(compute_gradient)(i) for i in range(0, num_samples, batch_size))
+
+                # Суммирование градиентов
+                for batch_gradients in all_gradients:
+                    for param_idx in range(len(params)):
+                        gradients_S[param_idx] = [x + y for x, y in
+                                                  zip(gradients_S[param_idx], batch_gradients[param_idx])]
+
                 gradients_S = [[x / (num_samples / batch_size) for x in sublist] for sublist in gradients_S]
                 return gradients_S
 
             for epoch in range(n_epochs):
                 gradients = _calculate_gradients(fn_opt_params)
                 gradients = [[x * learning_rate for x in sublist] for sublist in gradients]
-                fn_opt_params = [[x - y for x, y in zip(sublist1, sublist2)] for sublist1, sublist2 in zip(fn_opt_params, gradients)]
+                fn_opt_params = [[x - z for x, z in zip(sublist1, sublist2)] for sublist1, sublist2 in
+                                 zip(fn_opt_params, gradients)]
 
             return fn_opt_params
 
-
+        # Пример использования
         optimal_weights = sgd_opt(
             _model,
             _loss,
             params_to_optimize,
-            [  # inputs
-                dynamic_weights,
-                dynamic_y,
-            ],
+            [dynamic_weights, dynamic_y],
             y,
             n_epochs=100,
-            batch_size=4,
+            batch_size=10
         )
-
 
         self.tree_weights = optimal_weights[0].copy()
         self.feature_weights = optimal_weights[1].copy()
-
+        print('optimal_weights')
+        print(optimal_weights)
         if self.params.eps is not None:
             self.static_weights = _softmax(optimal_weights[2].copy())
 
         return self
     #-------------------
+
+    def optimize_weights_sgdd(self, X, y) -> 'AttentionForest':
+        assert self.forest is not None, "Need to fit before weights optimization"
+        y = self._preprocess_target(y)
+        # print(y)
+        dynamic_weights, dynamic_y = self._get_dynamic_weights_y(X)  # dynamic_weights - A()
+
+        if dynamic_y.shape[2] == 1:
+            dynamic_y = dynamic_y[..., 0]
+
+        w_init = np.ones(self.forest.n_estimators)
+        n_features = X.shape[1]
+        feature_weights_init = np.ones(n_features)
+
+        if self.params.eps is not None:
+            static_weights_init = np.ones(self.forest.n_estimators) / self.forest.n_estimators
+
+        def _model(fn_dyn_weights, fn_dyn_y, curr_w, curr_feature_weights):
+            np.set_printoptions(suppress=True)
+            # fn_dyn_weights = x - A_k(x)
+            new_dyn_weights = -0.5 * np.linalg.norm(fn_dyn_weights / curr_feature_weights, 2, axis=-1) ** 2.0
+            # alphas = alpha(x,A_k(x),v,z)
+            alphas = new_dyn_weights * np.abs(curr_w)
+            alphas_softmax = _softmax(alphas, axis=1)
+            # print("alphas")
+            # print(alphas)
+
+            if self.params.eps is not None:
+                static_softmax = _softmax(static_weights_init, axis=0)
+                mixed_weights = (1.0 - self.params.eps) * alphas_softmax + self.params.eps * static_softmax
+            else:
+                mixed_weights = alphas_softmax
+            if dynamic_y.ndim == 3:
+                mixed_weights = mixed_weights[..., np.newaxis]
+            # print("summa")
+            # print(np.sum(
+            #     np.multiply(mixed_weights, fn_dyn_y),
+            #     axis=1
+            # ))
+            # sum alpha()p_k(x)
+            return np.sum(
+                np.multiply(mixed_weights, fn_dyn_y),
+                axis=1
+            )
+
+        def _loss(cur_preds, y_true):
+            # L(p(x),h,v,z)
+            # print("cur_preds")
+            # print(cur_preds)
+            # print("y_true")
+            # print(y_true)
+            loss_terms = cur_preds - y_true
+            # print("loss_terms")
+            # print(loss_terms)
+            if self.params.loss_ord == 1:
+                loss = np.sum(np.abs(loss_terms))
+            elif self.params.loss_ord == 2:
+                if loss_terms.ndim == 2:
+                    loss = np.sum(np.linalg.norm(loss_terms, 2, axis=1) ** 2)
+                else:
+                    loss = np.sum(loss_terms ** 2)
+            else:
+                raise ValueError(f'Wrong loss order: {self.params.loss_ord}')
+            # print("loss")
+            # print(loss)
+            return loss
+
+        print("Dynamic_y", dynamic_y.shape)
+
+        opt_params = [w_init, feature_weights_init]
+
+        if self.params.eps is not None:
+            opt_params.append(static_weights_init)
+        if self.params.no_temp:
+            # don't optimize `w`
+            params_to_optimize = opt_params[1:]
+        else:
+            params_to_optimize = opt_params
+        params_to_optimize_lens = list(map(len, params_to_optimize))
+
+        # print("params_to_optimize_lens", params_to_optimize_lens)
+
+        # стохастический градиентный спуск
+        def opt(model_func, loss_func, fn_opt_params, inputs, y_s, n_epochs=100, batch_size=1, learning_rate=0.01):
+            num_samples = y_s.shape[0]
+
+            def _calculate_gradients(params):
+                gradients_S = [[0] * len(sublist) for sublist in fn_opt_params]
+
+                def compute_gradient(batch_idx):
+                    batch_inputs = [inp[batch_idx:batch_idx + batch_size] for inp in inputs]
+                    batch_y = y_s[batch_idx:batch_idx + batch_size]
+                    batch_gradients = [[0] * len(param_group) for param_group in params]
+
+                    for param_idx, param_group in enumerate(params):
+                        for p_idx in range(len(param_group)):
+                            perturbation = np.zeros(len(param_group))
+                            perturbation[p_idx] = 1e-6
+
+                            params_pos = np.copy(param_group) + perturbation
+                            params_neg = np.copy(param_group) - perturbation
+
+                            current_params_pos = list(params)
+                            current_params_neg = list(params)
+                            current_params_pos[param_idx] = params_pos
+                            current_params_neg[param_idx] = params_neg
+
+                            loss_pos = loss_func(model_func(*batch_inputs, *current_params_pos), batch_y)
+                            loss_neg = loss_func(model_func(*batch_inputs, *current_params_neg), batch_y)
+
+                            batch_gradients[param_idx][p_idx] = (loss_pos - loss_neg) / (2 * 1e-6)
+
+                    return batch_gradients
+
+                # Параллельное вычисление градиентов для каждого батча
+                all_gradients = Parallel(n_jobs=-1)(
+                    delayed(compute_gradient)(i) for i in range(0, num_samples, batch_size))
+
+                # Суммирование градиентов
+                for batch_gradients in all_gradients:
+                    for param_idx in range(len(params)):
+                        gradients_S[param_idx] = [x + y for x, y in
+                                                  zip(gradients_S[param_idx], batch_gradients[param_idx])]
+
+                gradients_S = [[x / (num_samples / batch_size) for x in sublist] for sublist in gradients_S]
+                return gradients_S
+
+            for epoch in range(n_epochs):
+                gradients = _calculate_gradients(fn_opt_params)
+                gradients = [[x * learning_rate for x in sublist] for sublist in gradients]
+                fn_opt_params = [[x - z for x, z in zip(sublist1, sublist2)] for sublist1, sublist2 in
+                                 zip(fn_opt_params, gradients)]
+
+            return fn_opt_params
+
+        # Пример использования
+        optimal_weights = opt(
+            _model,
+            _loss,
+            params_to_optimize,
+            [dynamic_weights, dynamic_y],
+            y,
+            n_epochs=100,
+            batch_size=10
+        )
+
+        self.tree_weights = optimal_weights[0].copy()
+        self.feature_weights = optimal_weights[1].copy()
+        print('optimal_weights')
+        print(optimal_weights)
+        if self.params.eps is not None:
+            self.static_weights = _softmax(optimal_weights[2].copy())
+
+        return self
     def _get_dynamic_weights_y(self, X) -> Tuple[np.ndarray, np.ndarray]:
         np.set_printoptions(suppress=True)
         leaf_ids = self.forest.apply(X)
@@ -737,6 +790,8 @@ class FeatureWeightedAttentionForest(AttentionForest):
             for cur_tree_id, cur_leaf_id in enumerate(cur_leaf_ids):
                 leaf_mean_x = self.leaf_data_x[cur_tree_id][cur_leaf_id]
                 leaf_mean_y = self.leaf_data_y[cur_tree_id][cur_leaf_id]
+                # print("cur_tree_id,cur_leaf_id, leaf_mean_y  ")
+                # print(cur_tree_id,cur_leaf_id, leaf_mean_y)
                 # tree_dynamic_weight = -0.5 * np.linalg.norm(cur_x - leaf_mean_x, 2) ** 2.0
                 # NOTE: here `tree_dynamic_weight` are not actually weights
                 tree_dynamic_weight = (cur_x - leaf_mean_x)#x - A(x)
@@ -748,45 +803,52 @@ class FeatureWeightedAttentionForest(AttentionForest):
             all_y.append(tree_dynamic_y)#p(x)
         all_dynamic_weights = np.array(all_dynamic_weights)
         all_y = np.array(all_y)
+        # print("all_y")
+        # print(all_y)
         return all_dynamic_weights, all_y
 
     def predict(self, X) -> np.ndarray:
         assert self.forest is not None, "Need to fit before predict"
         all_dynamic_weights, all_y = self._get_dynamic_weights_y(X)
-        print("  all_dynamic_weights shape:", all_dynamic_weights.shape, self.feature_weights.shape)
+        #print("  all_dynamic_weights shape:", all_dynamic_weights.shape, self.feature_weights.shape)
         all_dynamic_weights = -0.5 * np.linalg.norm(all_dynamic_weights / self.feature_weights, 2, axis=-1) ** 2.0
-        weights = _softmax(all_dynamic_weights * self.tree_weights[np.newaxis], axis=1)
+        #weights = _softmax(all_dynamic_weights * self.tree_weights[np.newaxis], axis=1)
+        weights = _softmax(all_dynamic_weights * self.tree_weights, axis=1)
+        # print("weights")
+        # print(weights)
         if self.params.eps is not None:
             mixed_weights = (1.0 - self.params.eps) * weights + self.params.eps * self.static_weights
         else:
             mixed_weights = weights
         mixed_weights = mixed_weights[..., np.newaxis]
         predictions = np.sum(mixed_weights * all_y, axis=1)
+        # print("predictions:")
+        # print(predictions)
         return predictions
 
-    def predict_proba(self, X):
-        assert self.forest is not None, "Need to fit before predict_proba"
-        all_dynamic_weights, all_y = self._get_dynamic_weights_y(X)
-        all_dynamic_weights = -0.5 * np.linalg.norm(all_dynamic_weights / self.feature_weights, 2, axis=-1) ** 2.0
-        #print(self.tree_weights)
-        weights = _softmax(all_dynamic_weights * self.tree_weights, axis=1)
-        if self.params.eps is not None:
-            mixed_weights = (1.0 - self.params.eps) * weights + self.params.eps * self.static_weights
-        else:
-            mixed_weights = weights
-        mixed_weights = mixed_weights[..., np.newaxis]
-        predictions = np.sum(mixed_weights * all_y, axis=1)
-
-        # Преобразуем значения в вероятности, используя softmax
-        # Каждое значение будет преобразовано в вероятность для каждого класса
-        if predictions.ndim == 1:
-            # Для случая бинарной классификации
-            predictions_proba = np.column_stack((1 - predictions, predictions))
-        else:
-            # Для многоклассовой классификации
-            predictions_proba = _softmax(predictions, axis=1)
-
-        return predictions_proba
+    # def predict_proba(self, X):
+    #     assert self.forest is not None, "Need to fit before predict_proba"
+    #     all_dynamic_weights, all_y = self._get_dynamic_weights_y(X)
+    #     all_dynamic_weights = -0.5 * np.linalg.norm(all_dynamic_weights / self.feature_weights, 2, axis=-1) ** 2.0
+    #     #print(self.tree_weights)
+    #     weights = _softmax(all_dynamic_weights * self.tree_weights, axis=1)
+    #     if self.params.eps is not None:
+    #         mixed_weights = (1.0 - self.params.eps) * weights + self.params.eps * self.static_weights
+    #     else:
+    #         mixed_weights = weights
+    #     mixed_weights = mixed_weights[..., np.newaxis]
+    #     predictions = np.sum(mixed_weights * all_y, axis=1)
+    #
+    #     # Преобразуем значения в вероятности, используя softmax
+    #     # Каждое значение будет преобразовано в вероятность для каждого класса
+    #     if predictions.ndim == 1:
+    #         # Для случая бинарной классификации
+    #         predictions_proba = np.column_stack((1 - predictions, predictions))
+    #     else:
+    #         # Для многоклассовой классификации
+    #         predictions_proba = _softmax(predictions, axis=1)
+    #
+    #     return predictions_proba
 
     def predict_original(self, X):
         if self.params.task == TaskType.REGRESSION:
